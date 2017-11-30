@@ -10,3 +10,5 @@ Bash script to be called from openvpn, to isolate shell or programs from the non
 to download it and create the two symlinks that need to be called by openvpn (see content of the script).
 
 Do what you want with it I don't care what kind of drugs you're buying from tor networks :)
+
+PS: needs root priviledges. If you want to execute stuff as non-root, type "sudo -u *youruser* bash" or whatever shell you use
