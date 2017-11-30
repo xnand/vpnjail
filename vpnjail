@@ -62,8 +62,8 @@ print_usage() {
 setup() {
 
   folder=$(readlink -f $0 | sed s"%$link_name%%")
-  ln -s "$folder""$link_name" "$folder""$link_name""_up"
-  ln -s "$folder""$link_name" "$folder""$link_name""_down"
+  ln -s "$folder""$link_name" "$folder"/"$link_name""_up"
+  ln -s "$folder""$link_name" "$folder"/"$link_name""_down"
 
   echo "Setup done, executing \"ls -l $folder | grep $link_name\", check files!"
   ls -l "$folder" | grep "$link_name"
