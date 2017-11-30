@@ -1,0 +1,215 @@
+#!/usr/bin/bash
+
+# run openvpn as: openvpn --route-nopull --script-security 2 --up *up_script_path* \
+#  --down *down_script_path* --up-restart --config *config_file*
+# executed by openvpn as:
+# cmd tun_dev tun_mtu link_mtu ifconfig_local_ip ifconfig_remote_ip [ init | restart ]
+
+# when vpn server is unreachable, openvpn calls:
+# down restart (several times) -> up restart (preserving previous tun/tap) -> down init (close and reopen tun/tap) -> up init
+
+# to allow programs inside namespace to communicate with other networks, see:
+# https://serverfault.com/questions/326493/basic-iptables-nat-port-forwarding
+
+# TODO list
+# - check that table exists before running iptables -D !!!!!!!
+# - enable/disable forwarding for the needed interface only
+# - find out why bash is not terminated inside the namespace - maybe execute the loop twice?
+# - spawn shell with calling user privileges
+# - set an option to restart every process terminated by down_init
+# - set an option to disable process termination and network namespace deletion?
+
+
+if ! [[ $(id -u) = 0 ]]; then
+   echo "Root privileges are needed!"
+   exit 1
+fi
+
+# name of the main script
+script_name="$(basename "$(test -L "$0" && readlink "$0" || echo "$0")")"
+# name of the link pointing to this script, used to determine the action to take
+link_name="$(basename $0)"
+
+ns_name=vpn_ns
+vpn_veth=vpn_veth
+vpn_veth_ip=192.168.100.1
+vpn_veth_nm=24
+vpn_vpeer=vpn_vpeer
+vpn_vpeer_ip=192.168.100.2
+vpn_vpeer_nm=24
+rule_table_num=333
+rule_table_priority=30000
+tun_dev=$1
+tun_tmu=$2
+link_mtu=$3
+vpn_local_ip=$4
+vpn_remote_ip=$5
+script_cmd=$6 # init or restart
+# opendns nameservers
+DNS1=208.67.222.222
+DNS2=208.67.220.220
+
+print_usage() {
+
+  echo "This script must be called by openvpn through a symbolic link to create the network namespace"
+  echo "Pass \"--up $0_up\" and \"--down $0_down\" to openvpn"
+  echo "Run \"$0 setup\" to create the links in the same directory where this script is"
+  echo "Once the namespace is created, you can directly call \"$0\" without arguments to spawn a shell inside it"
+  echo "Root privileges are required"
+
+}
+
+setup() {
+
+  folder=$(readlink -f $0 | sed s"%$link_name%%")
+  ln -s "$folder""$link_name" "$folder""$link_name""_up"
+  ln -s "$folder""$link_name" "$folder""$link_name""_down"
+
+  echo "Setup done, executing \"ls -l $folder | grep $link_name\", check files!"
+  ls -l "$folder" | grep "$link_name"
+
+}
+
+up_init() {
+
+  # create the namespace
+  ip netns add $ns_name
+
+  # bring loopback interface up and assign it an address
+  ip netns exec $ns_name ip link set up dev lo
+
+  # create virtual ethernet interfaces
+  ip link add $vpn_veth type veth peer name $vpn_vpeer
+
+  # add peer virtual ethernet interface to the namespace
+  ip link set $vpn_vpeer netns $ns_name
+
+  # setup IPv4 address for veth interface
+  ip addr add $vpn_veth_ip/$vpn_veth_nm dev $vpn_veth
+  ip link set up dev $vpn_veth
+
+  # setup IPv4 address for vpeer interface
+  ip netns exec $ns_name ip addr add $vpn_vpeer_ip/$vpn_vpeer_nm dev $vpn_vpeer
+  ip netns exec $ns_name ip link set up dev $vpn_vpeer
+
+  # add default route to exit from namespace
+  ip netns exec $ns_name ip route add default via $vpn_veth_ip dev $vpn_vpeer
+
+  # add DNS servers
+  [[ $DNS1 != "" ]] && mkdir -p /etc/netns/$ns_name/ && echo "nameserver $DNS1" > /etc/netns/$ns_name/resolv.conf
+  [[ $DNS1 != "" ]] && [[ $DNS2 != "" ]] && echo "nameserver $DNS2" >> /etc/netns/$ns_name/resolv.conf
+
+  # add rule to direct traffic from namespace to vpn (vpeer -> veth -> tun)
+  ip rule add iif $vpn_veth table $rule_table_num priority $rule_table_priority
+  ip route add default via $vpn_local_ip dev $tun_dev table $rule_table_num
+
+  # add rule to prevent bad things happening if vpn and tun_dev goes down in a strange way
+  ip rule add iif $vpn_veth table $(($rule_table_num+1)) priority $(($rule_table_priority+1))
+  ip route add unreachable default table $(($rule_table_num+1))
+
+  # enable IPv4 forwarding and masquerading
+  sysctl net.ipv4.ip_forward=1 > /dev/null
+  iptables -v -t nat -L POSTROUTING | grep -q ".*DROP.*$tun_dev" &&
+  iptables -t nat -D POSTROUTING -o $tun_dev -j DROP
+  iptables -t nat -A POSTROUTING -o $tun_dev -j MASQUERADE
+
+}
+
+up_restart() {
+
+  # re-enable masquerading
+  iptables -v -t nat -L POSTROUTING | grep -q ".*DROP.*$tun_dev" &&
+  iptables -t nat -D POSTROUTING -o $tun_dev -j DROP
+  iptables -t nat -A POSTROUTING -o $tun_dev -j MASQUERADE
+
+}
+
+down_init() {
+
+  # close all processes in the namespace
+  for proc in $(ip netns pids $ns_name); do
+    kill -s SIGTERM $proc
+  done
+
+  # delete the namespace and all interfaces associated with it
+  ip netns del $ns_name
+
+  # delete the DNSes associated with the namespace
+  rm -r /etc/netns/$ns_name
+
+  # delete firewall rule
+  iptables -t nat -D POSTROUTING -o $tun_dev -j MASQUERADE
+
+  # delete all routing rules
+  ip rule delete table $rule_table_num
+  ip rule delete table $(($rule_table_num+1))
+  ip route delete default table $(($rule_table_num+1))
+
+  # disable IPv4 forwarding
+  sysctl net.ipv4.ip_forward=0 > /dev/null
+
+}
+
+down_restart() {
+
+  # drop all packets coming from the namespace until vpn connection comes back up
+  iptables -v -t nat -L POSTROUTING | grep -q ".*MASQUERADE.*$tun_dev" &&
+  iptables -t nat -D POSTROUTING -o $tun_dev -j MASQUERADE &&
+  iptables -A OUTPUT -o $tun_dev -j DROP # TODO change in OUTPUT or FORWARD
+
+}
+
+
+# up script called
+if [[ "$link_name" = "$script_name""_up" ]]
+then
+
+  if [[ $script_cmd = "init" ]]
+  then
+    up_init
+
+  elif [[ $script_cmd = "restart" ]]
+  then
+    up_restart
+
+  else
+    exit 1
+
+  fi
+
+# down script called
+elif [[ "$link_name" = "$script_name""_down" ]]
+then
+
+  if [[ $script_cmd = "init" ]]
+  then
+    down_init
+
+  elif [[ $script_cmd = "restart" ]]
+  then
+    down_restart
+
+  else
+    exit 1
+
+  fi
+
+# shell or setup script called
+else
+
+  if [[ $1 = "" ]]
+  then
+    # spawn a shell inside the namespace
+    (! (ip netns | grep $ns_name) && echo "The namespace does not exist!") || (echo "Spawning shell" && ip netns exec $ns_name /bin/bash)
+
+  elif [[ $1 = "setup" ]]
+  then
+    setup
+
+  else
+    print_usage
+    exit 1
+
+  fi
+
+fi
