@@ -5,7 +5,7 @@ Bash script to be called from openvpn, to isolate shell or programs from the non
     git clone https://github.com/xnand/vpnjail.git
     cd vpnjail
     chmod 755 vpnjail
-    sudo vpnjail setup
+    sudo ./vpnjail setup
     
 to download it and create the two symlinks that need to be called by openvpn (see content of the script).
 
