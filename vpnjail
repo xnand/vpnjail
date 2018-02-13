@@ -19,11 +19,12 @@
 # - set an option to restart every process terminated by down_init
 # - set an option to disable process termination and network namespace deletion?
 
-
-if ! [[ $(id -u) = 0 ]]; then
-   echo "Root privileges are needed!"
-   exit 1
-fi
+checkroot() {
+  if ! [[ $(id -u) = 0 ]]; then
+     echo "Root privileges are needed!"
+     exit 1
+  fi
+}
 
 # name of the main script
 script_name="$(basename "$(test -L "$0" && readlink "$0" || echo "$0")")"
@@ -164,6 +165,7 @@ down_restart() {
 if [[ "$link_name" = "$script_name""_up" ]]
 then
 
+  checkroot
   if [[ $script_cmd = "init" ]]
   then
     up_init
@@ -181,6 +183,7 @@ then
 elif [[ "$link_name" = "$script_name""_down" ]]
 then
 
+  checkroot
   if [[ $script_cmd = "init" ]]
   then
     down_init
@@ -199,6 +202,7 @@ else
 
   if [[ $1 = "" ]]
   then
+    checkroot
     # spawn a shell inside the namespace
     (! (ip netns | grep $ns_name) && echo "The namespace does not exist!") || (echo "Spawning shell" && ip netns exec $ns_name /bin/bash)
 
