@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
 # run openvpn as: openvpn --route-nopull --script-security 2 --up *up_script_path* \
 #  --down *down_script_path* --up-restart --config *config_file*
