@@ -31,7 +31,9 @@ script_name="$(basename "$(test -L "$0" && readlink "$0" || echo "$0")")"
 # name of the link pointing to this script, used to determine the action to take
 link_name="$(basename $0)"
 
+# namespace name
 ns_name=vpn_ns
+# virtual eth interface
 vpn_veth=vpn_veth
 vpn_veth_ip=192.168.100.1
 vpn_veth_nm=24
@@ -40,34 +42,35 @@ vpn_vpeer_ip=192.168.100.2
 vpn_vpeer_nm=24
 rule_table_num=333
 rule_table_priority=30000
+# arguments passed by openvpn
 tun_dev=$1
 tun_tmu=$2
 link_mtu=$3
 vpn_local_ip=$4
 vpn_remote_ip=$5
 script_cmd=$6 # init or restart
-# opendns nameservers
+# nameservers to apply in the namespace - default to openvpn
 DNS1=208.67.222.222
 DNS2=208.67.220.220
 
 print_usage() {
 
+  script_name=$(readlink -f $0)
   echo "This script must be called by openvpn through a symbolic link to create the network namespace"
-  echo "Pass \"--up $0_up\" and \"--down $0_down\" to openvpn"
-  echo "Run \"$0 setup\" to create the links in the same directory where this script is"
-  echo "Once the namespace is created, you can directly call \"$0\" without arguments to spawn a shell inside it"
-  echo "Root privileges are required"
+  echo "Pass \"--up "$script_name"_up\" and \"--down "$script_name"_down\" to openvpn"
+  echo "Run \"$0 setup\" to create the links in the same directory where this script is stored"
+  echo "Once the namespace is created, you can directly call \"$script_name\" without arguments to spawn a shell inside it"
+  echo "Root privileges are required, except for setup"
 
 }
 
 setup() {
 
-  folder=$(readlink -f $0 | sed s"%$link_name%%")
+  folder=$(readlink -f $0 | grep -o -e ".*\/")
   ln -s "$folder""$link_name" "$folder"/"$link_name""_up"
   ln -s "$folder""$link_name" "$folder"/"$link_name""_down"
 
-  echo "Setup done, executing \"ls -l $folder | grep $link_name\", check files!"
-  ls -l "$folder" | grep "$link_name"
+  echo "Required files created. Do not rename symlinks"
 
 }
 
@@ -160,60 +163,48 @@ down_restart() {
 
 }
 
+# look at link name to determine function to execute
+case "$link_name" in
+	"$script_name""_up")
+		checkroot
+		case "$script_cmd" in
+			init)
+				up_init
+				;;
+			restart)
+				up_restart
+				;;
+			*)
+				exit 1
+				;;
+		esac
+		;;
+	"$script_name""_down")
+		checkroot
+		case "$script_cmd" in
+			init)
+				down_init
+				;;
+			restart)
+				down_restart
+				;;
+			*)
+				exit 1
+				;;
+		esac
+		;;
+	*)
+		case "$1" in
+			setup)
+				setup
+				;;
+			"")
+				(! (ip netns | grep $ns_name) && echo "The namespace does not exist!") || (echo "Spawning shell" && ip netns exec $ns_name /bin/bash)
+				;;
+			*)
+				print_usage
+				;;
+		esac
+		;;
+esac
 
-# up script called
-if [[ "$link_name" = "$script_name""_up" ]]
-then
-
-  checkroot
-  if [[ $script_cmd = "init" ]]
-  then
-    up_init
-
-  elif [[ $script_cmd = "restart" ]]
-  then
-    up_restart
-
-  else
-    exit 1
-
-  fi
-
-# down script called
-elif [[ "$link_name" = "$script_name""_down" ]]
-then
-
-  checkroot
-  if [[ $script_cmd = "init" ]]
-  then
-    down_init
-
-  elif [[ $script_cmd = "restart" ]]
-  then
-    down_restart
-
-  else
-    exit 1
-
-  fi
-
-# shell or setup script called
-else
-
-  if [[ $1 = "" ]]
-  then
-    checkroot
-    # spawn a shell inside the namespace
-    (! (ip netns | grep $ns_name) && echo "The namespace does not exist!") || (echo "Spawning shell" && ip netns exec $ns_name /bin/bash)
-
-  elif [[ $1 = "setup" ]]
-  then
-    setup
-
-  else
-    print_usage
-    exit 1
-
-  fi
-
-fi
